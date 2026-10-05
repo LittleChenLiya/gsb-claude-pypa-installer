@@ -1,5 +1,6 @@
 import io
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -197,3 +198,93 @@ class TestSchemeDictionaryDestination:
     def test_blocking_path_traversal(self, destination):
         with pytest.raises(ValueError):
             destination._path_with_destdir("purelib", "subdir/../../outside.txt")
+
+    def test_write_to_fs_cleans_up_on_failure(self, destination_overwrite_existing):
+        # When writing fails, the temporary file must be cleaned up and any
+        # existing file must remain untouched.
+        destination = destination_overwrite_existing
+        target = Path(destination.scheme_dict["data"]) / "my_data.bin"
+        # Pre-create an existing file that must not be clobbered.
+        target.write_bytes(b"original content")
+
+        # Force a write failure on the temporary file.
+        original_open = Path.open
+
+        def failing_open(self, mode="r", *args, **kwargs):
+            if mode == "wb" and self.name.endswith(".tmp"):
+                raise OSError("simulated write failure")
+            return original_open(self, mode, *args, **kwargs)
+
+        with mock.patch.object(
+            Path, "open", failing_open
+        ), pytest.raises(OSError, match="simulated write failure"):
+            destination.write_to_fs(
+                "data", "my_data.bin", io.BytesIO(b"new content"), False
+            )
+
+        # The existing file must be untouched.
+        assert target.read_bytes() == b"original content"
+        # No leftover temporary files.
+        assert not list(target.parent.glob("*.tmp"))
+
+    def test_finalize_record_size_matches_file(self, destination):
+        # The RECORD entry for each file must report the actual final size of
+        # the file on disk.
+        records = [
+            (
+                "data",
+                destination.write_file(
+                    "data", "my_data.bin", io.BytesIO(b"my data 1"), False
+                ),
+            ),
+            (
+                "scripts",
+                destination.write_file(
+                    "scripts",
+                    "my_script.py",
+                    io.BytesIO(b"#!python\nmy script\n"),
+                    is_executable=True,
+                ),
+            ),
+            ("purelib", RecordEntry("RECORD", None, None)),
+        ]
+
+        destination.finalize_installation("purelib", "RECORD", records)
+        record_path = Path(destination.scheme_dict["purelib"]) / "RECORD"
+        record_lines = record_path.read_bytes().split(b"\n")
+
+        for scheme, record in records:
+            if record.hash_ is None:
+                continue
+            target_path = Path(destination.scheme_dict[scheme]) / record.path
+            actual_size = target_path.stat().st_size
+            # Find the RECORD line for this file and check its size field.
+            for line in record_lines:
+                if line.startswith(record.path.encode() + b","):
+                    parts = line.split(b",")
+                    assert int(parts[2]) == actual_size, (
+                        f"RECORD size for {record.path} ({parts[2]}) does not "
+                        f"match actual file size ({actual_size})"
+                    )
+
+    def test_write_script_with_space_in_interpreter_path(self, destination):
+        # An interpreter path containing a space (e.g. on D:) must be correctly
+        # referenced in the generated script.
+        script_args = ("my_entrypoint", "my_module", "my_function", "console")
+        # Use a destination whose interpreter path contains a space.
+        scheme_dict = {}
+        for scheme in SCHEME_NAMES:
+            full_path = Path(destination.scheme_dict[scheme])
+            scheme_dict[scheme] = str(full_path)
+        dest = SchemeDictionaryDestination(
+            scheme_dict, "D:\\path to my\\python.exe", "posix"
+        )
+        record = dest.write_script(*script_args)
+        file_path = Path(dest.scheme_dict["scripts"]) / "my_entrypoint"
+
+        assert file_path.is_file()
+        file_data = file_path.read_bytes()
+        # The shebang must reference the interpreter path, wrapped for POSIX.
+        assert file_data.startswith(b"#!/bin/sh\n")
+        assert b"'D:\\path to my\\python.exe'" in file_data
+        assert record.path == "my_entrypoint"

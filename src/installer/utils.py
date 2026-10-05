@@ -7,6 +7,7 @@ import hashlib
 import io
 import os
 import re
+import shlex
 import sys
 from collections import namedtuple
 from collections.abc import Callable, Iterable, Iterator
@@ -171,23 +172,122 @@ def get_launcher_kind() -> "LauncherKind":  # pragma: no cover
     raise NotImplementedError("Unknown launcher kind for this machine")
 
 
+def _is_executable_simple(executable: bytes) -> bool:
+    """Check if the executable path can be used directly in a shebang line.
+
+    A path is "simple" if it contains no spaces and the resulting shebang line
+    (``#!`` + path + newline) is short enough for the platform's shebang limit.
+    """
+    if b" " in executable:
+        return False
+    shebang_length = len(executable) + 3  # Prefix #! and newline after.
+    # According to distlib, Darwin can handle up to 512 characters. But I want
+    # to avoid platform sniffing to make this as platform-agnostic as possible.
+    # The "complex" script isn't that bad anyway.
+    return shebang_length <= 127
+
+
+def _build_shebang(executable: str, for_launcher: bool) -> bytes:
+    """Build a shebang line for the given interpreter.
+
+    The interpreter is used as-is; this function does not consult ``PATH`` or
+    guess the user environment. When the path contains spaces, a
+    platform-supported wrapper is generated:
+
+    - On Windows (or for launcher executables), the path is enclosed in double
+      quotes so the launcher can resolve it correctly.
+    - On POSIX, a ``/bin/sh`` wrapper script is emitted that re-executes the
+      interpreter with the original arguments.
+
+    :param executable: Path to the interpreter executable.
+    :param for_launcher: Whether this shebang is consumed by a launcher
+        executable (Windows). When ``True`` the path is quoted rather than
+        wrapped in ``/bin/sh``. This also determines the target platform:
+        ``True`` means Windows, ``False`` means POSIX.
+    :return: The shebang line as bytes.
+    """
+    executable_bytes = executable.encode("utf-8")
+    if for_launcher:
+        # On Windows (or for launchers), use a simple shebang. Enquote the
+        # executable if it contains spaces, so the launcher can resolve it.
+        if b" " in executable_bytes:
+            executable_bytes = b'"' + executable_bytes + b'"'
+        return b"#!" + executable_bytes
+    if _is_executable_simple(executable_bytes):
+        return b"#!" + executable_bytes
+
+    # Shebang support for an executable with a space in it is under-specified
+    # and platform-dependent, so we use a clever hack to generate a script to
+    # run in ``/bin/sh`` that should work on all reasonably modern platforms.
+    # Read the following message to understand how the hack works:
+    # https://github.com/pypa/installer/pull/4#issuecomment-623668717
+    quoted = shlex.quote(executable).encode("utf-8")
+    # I don't understand a lick what this is trying to do.
+    return b"#!/bin/sh\n'''exec' " + quoted + b' "$0" "$@"\n' + b"' '''"
+
+
+def _get_windowed_interpreter(executable: str) -> str:
+    """Get the windowed (GUI) variant of the interpreter executable.
+
+    On Windows this replaces ``python`` with ``pythonw`` in the file name.
+    On other platforms the path is returned unchanged, since there is no
+    separate windowed interpreter. The path separator style (forward or back
+    slash) is preserved.
+    """
+    if os.name != "nt":
+        return executable
+    # Determine the separator used in the path, so we preserve the style
+    # (e.g. a POSIX-style path on Windows keeps its forward slashes).
+    if "\\" in executable:
+        sep = "\\"
+    elif "/" in executable:
+        sep = "/"
+    else:
+        sep = None
+    if sep is None:
+        return executable.replace("python", "pythonw")
+    dn, fn = executable.rsplit(sep, 1)
+    fn = fn.replace("python", "pythonw")
+    return dn + sep + fn
+
+
+# The exact placeholder shebangs recognised by wheel installers.
+_PYTHON_SHEBANG = b"#!python"
+_PYTHONW_SHEBANG = b"#!pythonw"
+
+
 @contextlib.contextmanager
 def fix_shebang(stream: BinaryIO, interpreter: str) -> Iterator[BinaryIO]:
-    """Replace ``#!python`` shebang in a stream with the correct interpreter.
+    """Replace ``#!python`` and ``#!pythonw`` shebang placeholders in a stream.
+
+    Only the exact ``#!python`` and ``#!pythonw`` placeholders are replaced,
+    using the interpreter supplied by the caller (never guessed from ``PATH``).
+    All other shebangs (such as ``#!/bin/sh``) are preserved unchanged. The
+    remainder of the stream is copied verbatim, so the original script tail
+    content is not corrupted.
 
     :param stream: stream to modify
-    :param interpreter: "correct interpreter" to substitute the shebang with
+    :param interpreter: The interpreter to substitute for ``#!python``. The
+        windowed variant (``pythonw``) is used for ``#!pythonw``.
 
     :returns: A context manager, that provides an appropriately modified stream.
     """
     stream.seek(0)
-    if stream.read(8) == b"#!python":
+    first_line = stream.readline()
+    # Strip the trailing newline(s) to compare against the placeholders.
+    stripped = first_line.rstrip(b"\r\n")
+    if stripped in (_PYTHON_SHEBANG, _PYTHONW_SHEBANG):
+        if stripped == _PYTHONW_SHEBANG:
+            target = _get_windowed_interpreter(interpreter)
+        else:
+            target = interpreter
         new_stream = io.BytesIO()
-        # write our new shebang
-        new_stream.write(f"#!{interpreter}\n".encode())
-        # copy the rest of the stream
-        stream.seek(0)
-        stream.readline()  # skip first line
+        # Write our new shebang, with a platform-supported wrapper if needed.
+        # On Windows the shebang is just a comment (no launcher is prepended),
+        # but enquoting a space-containing path is still safe and correct.
+        new_stream.write(_build_shebang(target, for_launcher=os.name == "nt"))
+        new_stream.write(b"\n")
+        # Copy the rest of the stream verbatim.
         while True:
             buf = stream.read(_COPY_BUFSIZE)
             if not buf:

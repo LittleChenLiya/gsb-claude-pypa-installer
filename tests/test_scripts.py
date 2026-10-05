@@ -41,20 +41,52 @@ def _read_launcher_data(section, kind):
 def test_script_generate_launcher(section, kind):
     launcher_data = _read_launcher_data(section, kind)
 
+    # Use a plain interpreter path containing a space (e.g. on D:).
+    executable = "D:\\path to my\\python.exe"
     script = Script("foo", "foo.bar", "baz.qux", section=section)
-    name, data = script.generate("#!C:\\path to my\\python.exe\n", kind=kind)
+    name, data = script.generate(executable, kind=kind)
 
-    prefix_len = len(launcher_data) + len(b"#!C:\\path to my\\python.exe\n")
+    # Determine the expected shebang (quoted path, pythonw for gui).
+    if section == "gui":
+        expected_shebang = b'#!"D:\\path to my\\pythonw.exe"\n'
+    else:
+        expected_shebang = b'#!"D:\\path to my\\python.exe"\n'
+
+    prefix_len = len(launcher_data) + len(expected_shebang)
     stream = io.BytesIO(data[prefix_len:])
     with zipfile.ZipFile(stream) as zf:
         code = zf.read("__main__.py")
 
     assert name == "foo.exe"
     assert data.startswith(launcher_data)
+    # The shebang must be exactly the expected line, not a doubled ``#!``.
+    assert data[len(launcher_data):len(launcher_data) + len(expected_shebang)] == expected_shebang
+    assert b"\nfrom foo.bar import baz\n" in code
+    assert b"baz.qux()" in code
+
+
+@pytest.mark.parametrize("section", ["console", "gui"])
+@pytest.mark.parametrize("kind", ["win-ia32", "win-amd64", "win-arm"])
+def test_script_generate_launcher_no_space(section, kind):
+    launcher_data = _read_launcher_data(section, kind)
+
+    executable = "D:\\Python\\python.exe"
+    script = Script("foo", "foo.bar", "baz.qux", section=section)
+    name, data = script.generate(executable, kind=kind)
+
     if section == "gui":
-        assert b"#!C:\\path to my\\pythonw.exe\n" in data
+        expected_shebang = b"#!D:\\Python\\pythonw.exe\n"
     else:
-        assert b"#!C:\\path to my\\python.exe\n" in data
+        expected_shebang = b"#!D:\\Python\\python.exe\n"
+
+    prefix_len = len(launcher_data) + len(expected_shebang)
+    stream = io.BytesIO(data[prefix_len:])
+    with zipfile.ZipFile(stream) as zf:
+        code = zf.read("__main__.py")
+
+    assert name == "foo.exe"
+    assert data.startswith(launcher_data)
+    assert data[len(launcher_data):len(launcher_data) + len(expected_shebang)] == expected_shebang
     assert b"\nfrom foo.bar import baz\n" in code
     assert b"baz.qux()" in code
 

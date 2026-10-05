@@ -1,5 +1,6 @@
 """Handles all file writing and post-installation processing."""
 
+import contextlib
 import io
 import os
 from collections.abc import Collection, Iterable
@@ -175,6 +176,9 @@ class SchemeDictionaryDestination(WheelDestination):
 
         - Ensures that an existing file is not being overwritten.
         - Hashes the written content, to determine the entry in the ``RECORD`` file.
+        - Writes to a temporary file first and renames on success, so that a
+          failure never leaves a partially-written file or clobbers an existing
+          file. The temporary file is cleaned up on failure.
         """
         target_path = self._path_with_destdir(scheme, path)
         if not self.overwrite_existing and target_path.exists():
@@ -185,11 +189,27 @@ class SchemeDictionaryDestination(WheelDestination):
         if not parent_folder.exists():
             parent_folder.mkdir(parents=True)
 
-        with target_path.open("wb") as f:
-            hash_, size = copyfileobj_with_hashing(stream, f, self.hash_algorithm)
+        # Write to a temporary file in the same directory, then atomically
+        # rename into place. This ensures that a failure during writing never
+        # leaves a partially-written file or clobbers an existing file.
+        temp_path = target_path.with_name(target_path.name + ".tmp")
+        try:
+            with temp_path.open("wb") as f:
+                hash_, size = copyfileobj_with_hashing(
+                    stream, f, self.hash_algorithm
+                )
 
-        if is_executable:
-            make_file_executable(target_path)
+            if is_executable:
+                make_file_executable(temp_path)
+
+            temp_path.replace(target_path)
+        except BaseException:
+            # Clean up the temporary file on any failure, but never touch the
+            # existing target file.
+            if temp_path.exists():
+                with contextlib.suppress(OSError):
+                    temp_path.unlink()
+            raise
 
         return RecordEntry(path, Hash(self.hash_algorithm, hash_), size)
 
@@ -271,6 +291,23 @@ class SchemeDictionaryDestination(WheelDestination):
                 target_path, optimize=level, quiet=1, ddir=dir_path_to_embed
             )
 
+    def _recompute_record_from_disk(
+        self, scheme: Scheme, record: RecordEntry
+    ) -> RecordEntry:
+        """Recompute a record's hash and size from the actual file on disk.
+
+        This ensures the ``RECORD`` file reflects the final bytes that were
+        actually written, rather than relying on values captured during the
+        (potentially interrupted) write process.
+        """
+        if record.hash_ is None or record.size is None:
+            # The RECORD file itself has no hash/size.
+            return record
+        target_path = self._path_with_destdir(scheme, record.path)
+        with target_path.open("rb") as f:
+            hash_, size = copyfileobj_with_hashing(f, io.BytesIO(), self.hash_algorithm)
+        return RecordEntry(record.path, Hash(self.hash_algorithm, hash_), size)
+
     def finalize_installation(
         self,
         scheme: Scheme,
@@ -296,7 +333,12 @@ class SchemeDictionaryDestination(WheelDestination):
                 )
             return path + "/"
 
-        record_list = list(records)
+        # Recompute every record's hash and size from the actual final bytes on
+        # disk, so the RECORD file is guaranteed to match what was installed.
+        record_list = [
+            (scheme_, self._recompute_record_from_disk(scheme_, record))
+            for scheme_, record in records
+        ]
         with construct_record_file(record_list, prefix_for_scheme) as record_stream:
             self.write_to_fs(
                 scheme, record_file_path, record_stream, is_executable=False

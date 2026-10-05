@@ -75,6 +75,73 @@ nox -s test-3.14
 Run the tests against Python 3.14. It is also possible to specify other supported
 Python versions (like `3.12` or `pypy3`).
 
+#### Running pytest directly
+
+For a faster feedback loop during development, you can run the test suite
+directly with [pytest] instead of going through nox:
+
+```sh
+python -m pytest tests/
+```
+
+Run the entire test suite.
+
+```sh
+python -m pytest tests/test_scripts.py
+```
+
+Run only the script-generation tests.
+
+```sh
+python -m pytest tests/test_utils.py -k shebang
+```
+
+Run only the shebang-related tests in `test_utils.py`.
+
+```sh
+python -m pytest tests/test_destinations.py -v
+```
+
+Run the destination tests with verbose output.
+
+### Script generation examples
+
+When generating entry-point scripts, `installer` writes a shebang line that
+points at the interpreter you provide. The interpreter is used as-is; it is
+never guessed from `PATH`.
+
+#### POSIX script with a space in the interpreter path
+
+If the interpreter path contains a space (for example `/path to my/python`), a
+`/bin/sh` wrapper is emitted so the script can still be executed directly:
+
+```sh
+#!/bin/sh
+'''exec' '/path to my/python' "$0" "$@"
+' '''
+# -*- coding: utf-8 -*-
+import re
+import sys
+from foo.bar import baz
+if __name__ == "__main__":
+    sys.argv[0] = re.sub(r"(-script\.pyw|\.exe)?$", "", sys.argv[0])
+    sys.exit(baz())
+```
+
+#### Windows GUI script with a space in the interpreter path
+
+On Windows, launcher executables (such as `w64.exe` for GUI scripts) read the
+shebang line to locate the interpreter. A path containing a space is enclosed
+in double quotes, and `pythonw.exe` is used for GUI scripts:
+
+```
+#!"D:\path to my\pythonw.exe"
+```
+
+The launcher executable is prepended to the script, so the generated file is a
+valid Windows `.exe` that runs the windowed interpreter without a console
+window.
+
 ### Documentation
 
 ```sh

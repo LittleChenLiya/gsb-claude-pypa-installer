@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import os
 import textwrap
 from email.message import Message
 from io import BytesIO
@@ -155,18 +156,18 @@ class TestScript:
             ),
             pytest.param(
                 b"#!pythonw\ntest",
-                b"#!/my/python\ntest",
+                b"#!/my/pythonw\ntest",
                 id="pythonw",
-            ),
-            pytest.param(
-                b"#!python something\ntest",
-                b"#!/my/python\ntest",
-                id="python-with-args",
             ),
             pytest.param(
                 b"#!python",
                 b"#!/my/python\n",
                 id="python-no-content",
+            ),
+            pytest.param(
+                b"#!pythonw",
+                b"#!/my/pythonw\n",
+                id="pythonw-no-content",
             ),
         ],
     )
@@ -180,6 +181,9 @@ class TestScript:
         [
             b"#!py\ntest",
             b"#!something\ntest",
+            b"#!python something\ntest",
+            b"#!/bin/sh\ntest",
+            b"#!/usr/bin/env python\ntest",
             b"#something\ntest",
             b"#something",
             b"something",
@@ -189,6 +193,30 @@ class TestScript:
         with BytesIO(data) as source, fix_shebang(source, "/my/python") as stream:
             result = stream.read()
         assert result == data
+
+    def test_replace_shebang_preserves_tail_content(self):
+        # The entire tail after the shebang line must be preserved verbatim,
+        # including binary data and multiple lines.
+        tail = b"line1\nline2\n\x00\x01\x02 binary data\n"
+        data = b"#!python\n" + tail
+        with BytesIO(data) as source, fix_shebang(source, "/my/python") as stream:
+            result = stream.read()
+        assert result == b"#!/my/python\n" + tail
+
+    def test_replace_shebang_with_space_in_path(self):
+        # An interpreter path containing spaces must be wrapped (POSIX) or
+        # quoted (Windows), not left as a bare path.
+        data = b"#!python\ntest\n"
+        with BytesIO(data) as source, fix_shebang(
+            source, "/path to my/python"
+        ) as stream:
+            result = stream.read()
+        if os.name == "nt":
+            assert result == b'#!"/path to my/python"\ntest\n'
+        else:
+            assert result.startswith(b"#!/bin/sh\n")
+            assert b"'/path to my/python'" in result
+            assert result.endswith(b"test\n")
 
 
 class TestConstructRecord:

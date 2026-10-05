@@ -1,8 +1,6 @@
 """Generate executable scripts, on various platforms."""
 
 import io
-import os
-import shlex
 import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -10,6 +8,7 @@ from importlib.resources import files
 from typing import TYPE_CHECKING
 
 from installer import _scripts
+from installer.utils import _build_shebang, _get_windowed_interpreter
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -83,9 +82,7 @@ class Script:
         On Windows, when the script section is gui-script, pythonw.exe should be used.
         """
         if self.section == "gui" and kind != "posix":
-            dn, fn = os.path.split(executable)
-            fn = fn.replace("python", "pythonw")
-            executable = os.path.join(dn, fn)  # noqa: PTH118
+            return _get_windowed_interpreter(executable)
         return executable
 
     def generate(self, executable: str, kind: "LauncherKind") -> tuple[str, bytes]:
@@ -120,35 +117,10 @@ class Script:
         return name, data
 
     @staticmethod
-    def _is_executable_simple(executable: bytes) -> bool:
-        if b" " in executable:
-            return False
-        shebang_length = len(executable) + 3  # Prefix #! and newline after.
-        # According to distlib, Darwin can handle up to 512 characters. But I want
-        # to avoid platform sniffing to make this as platform-agnostic as possible.
-        # The "complex" script isn't that bad anyway.
-        return shebang_length <= 127
-
-    def _build_shebang(self, executable: str, forlauncher: bool) -> bytes:
+    def _build_shebang(executable: str, forlauncher: bool) -> bytes:
         """Build a shebang line.
 
-        The non-launcher cases are taken directly from distlib's implementation,
-        which tries its best to account for command length, spaces in path, etc.
-
-        https://bitbucket.org/pypa/distlib/src/58cd5c6/distlib/scripts.py#lines-124
+        Delegates to :func:`installer.utils._build_shebang`, which handles
+        spaces in the interpreter path with a platform-supported wrapper.
         """
-        executable_bytes = executable.encode("utf-8")
-        if forlauncher:  # The launcher can just use the command as-is.
-            return b"#!" + executable_bytes
-        if self._is_executable_simple(executable_bytes):
-            return b"#!" + executable_bytes
-
-        # Shebang support for an executable with a space in it is under-specified
-        # and platform-dependent, so we use a clever hack to generate a script to
-        # run in ``/bin/sh`` that should work on all reasonably modern platforms.
-        # Read the following message to understand how the hack works:
-        # https://github.com/pypa/installer/pull/4#issuecomment-623668717
-
-        quoted = shlex.quote(executable).encode("utf-8")
-        # I don't understand a lick what this is trying to do.
-        return b"#!/bin/sh\n'''exec' " + quoted + b' "$0" "$@"\n' + b"' '''"
+        return _build_shebang(executable, for_launcher=forlauncher)
