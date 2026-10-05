@@ -156,7 +156,7 @@ class TestScript:
             pytest.param(
                 b"#!pythonw\ntest",
                 b"#!/my/python\ntest",
-                id="pythonw",
+                id="pythonw-posix",
             ),
             pytest.param(
                 b"#!python something\ntest",
@@ -176,10 +176,49 @@ class TestScript:
         assert result == expected
 
     @pytest.mark.parametrize(
+        ("kind", "expected"),
+        [
+            ("win-ia32", b'#!"C:\\path to my\\pythonw.exe"\n'),
+            ("win-amd64", b'#!"C:\\path to my\\pythonw.exe"\n'),
+            ("win-arm", b'#!"C:\\path to my\\pythonw.exe"\n'),
+            ("win-arm64", b'#!"C:\\path to my\\pythonw.exe"\n'),
+        ],
+    )
+    def test_replace_pythonw_windows_kind(self, kind, expected):
+        data = b"#!pythonw\nprint('x')"
+        with (
+            BytesIO(data) as source,
+            fix_shebang(source, r"C:\path to my\python.exe", kind) as stream,
+        ):
+            result = stream.read()
+        assert result == expected + b"print('x')"
+
+    def test_replace_python_spaced_posix_wraps(self):
+        data = b"#!python\nbody bytes\n"
+        with (
+            BytesIO(data) as source,
+            fix_shebang(source, "/path to my/python") as stream,
+        ):
+            result = stream.read()
+        assert result.startswith(b"#!/bin/sh\n")
+        assert b"'/path to my/python'" in result
+        assert result.endswith(b"body bytes\n")
+
+    def test_replace_shebang_crlf(self):
+        with (
+            BytesIO(b"#!python\r\nbody\r\n") as source,
+            fix_shebang(source, "/my/python") as stream,
+        ):
+            result = stream.read()
+        assert result == b"#!/my/python\r\nbody\r\n"
+
+    @pytest.mark.parametrize(
         "data",
         [
             b"#!py\ntest",
             b"#!something\ntest",
+            b"#!/bin/sh\ntest",
+            b"#!python3\ntest",
             b"#something\ntest",
             b"#something",
             b"something",

@@ -31,13 +31,18 @@ def test_script_generate_space_in_executable():
 
 def _read_launcher_data(section, kind):
     prefix = {"console": "t", "gui": "w"}[section]
-    suffix = {"win-ia32": "32", "win-amd64": "64", "win-arm": "_arm"}[kind]
+    suffix = {
+        "win-ia32": "32",
+        "win-amd64": "64",
+        "win-arm": "_arm",
+        "win-arm64": "64-arm",
+    }[kind]
     file = Path(_scripts.__file__).parent / f"{prefix}{suffix}.exe"
     return file.read_bytes()
 
 
 @pytest.mark.parametrize("section", ["console", "gui"])
-@pytest.mark.parametrize("kind", ["win-ia32", "win-amd64", "win-arm"])
+@pytest.mark.parametrize("kind", ["win-ia32", "win-amd64", "win-arm", "win-arm64"])
 def test_script_generate_launcher(section, kind):
     launcher_data = _read_launcher_data(section, kind)
 

@@ -908,6 +908,39 @@ class TestInstall:
             any_order=True,
         )
 
+    def test_calls_failure_hook_and_reraises_on_error(self, mock_destination):
+        mock_destination.write_file.side_effect = RuntimeError("disk full")
+
+        source = FakeWheelSource(
+            distribution="fancy",
+            version="1.0.0",
+            regular_files={
+                "fancy/__init__.py": b"""\
+                    def main():
+                        pass
+                """,
+            },
+            dist_info_files={
+                "WHEEL": b"""\
+                    Wheel-Version: 1.0
+                    Generator: magic (1.0.0)
+                    Root-Is-Purelib: true
+                    Tag: py3-none-any
+                """,
+                "METADATA": b"""\
+                    Metadata-Version: 2.1
+                    Name: fancy
+                    Version: 1.0.0
+                """,
+            },
+        )
+
+        with pytest.raises(RuntimeError, match="disk full"):
+            install(source, mock_destination, {})
+
+        mock_destination.finalize_installation_failed.assert_called_once_with()
+        mock_destination.finalize_installation.assert_not_called()
+
     def test_skips_pycache_and_warns(self, mock_destination):
         """Files inside a __pycache__ directory should be skipped and a
         RuntimeWarning emitted describing the skipped file.

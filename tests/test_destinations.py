@@ -197,3 +197,36 @@ class TestSchemeDictionaryDestination:
     def test_blocking_path_traversal(self, destination):
         with pytest.raises(ValueError):
             destination._path_with_destdir("purelib", "subdir/../../outside.txt")
+
+    def test_rollback_removes_new_files_and_created_dirs(self, destination):
+        # A file (and its parent directories) written during the attempt...
+        destination.write_to_fs(
+            "data", "new_folder/deep/data.bin", io.BytesIO(b"x"), False
+        )
+        data_root = Path(destination.scheme_dict["data"])
+        assert (data_root / "new_folder" / "deep" / "data.bin").exists()
+
+        destination.finalize_installation_failed()
+
+        assert not (data_root / "new_folder").exists()
+
+    def test_rollback_restores_overwritten_file(self, tmp_path):
+        scheme_dict = {}
+        for scheme in SCHEME_NAMES:
+            full_path = tmp_path / scheme
+            full_path.mkdir()
+            scheme_dict[scheme] = str(full_path)
+        destination = SchemeDictionaryDestination(
+            scheme_dict, "/my/python", "posix", overwrite_existing=True
+        )
+
+        target = Path(scheme_dict["data"]) / "existing.bin"
+        target.write_bytes(b"old contents")
+
+        destination.write_to_fs("data", "existing.bin", io.BytesIO(b"new"), False)
+        assert target.read_bytes() == b"new"
+
+        destination.finalize_installation_failed()
+
+        # The pre-existing file is restored; the install created no dirs.
+        assert target.read_bytes() == b"old contents"

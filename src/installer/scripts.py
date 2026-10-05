@@ -2,6 +2,7 @@
 
 import io
 import os
+import re
 import shlex
 import zipfile
 from collections.abc import Mapping
@@ -18,7 +19,13 @@ if TYPE_CHECKING:
     ScriptSection = Literal["console", "gui"]
 
 
-__all__ = ["InvalidScript", "Script"]
+__all__ = [
+    "InvalidScript",
+    "Script",
+    "build_shebang",
+    "get_gui_executable",
+    "parse_placeholder_shebang",
+]
 
 
 _ALLOWED_LAUNCHERS: Mapping[tuple["ScriptSection", "LauncherKind"], str] = {
@@ -41,6 +48,101 @@ if __name__ == "__main__":
     sys.argv[0] = re.sub(r"(-script\\.pyw|\\.exe)?$", "", sys.argv[0])
     sys.exit({func_path}())
 """
+
+
+# The placeholder shebangs recognised by the wheel installation procedure.
+# Only these exact tokens are placeholders; a "real" shebang such as
+# ``#!/bin/sh`` or ``#!python3`` is left untouched.
+_PLACEHOLDER_SHEBANG_RE = re.compile(rb"^#!(pythonw?)(?:[ \t]|$)")
+
+
+def parse_placeholder_shebang(line: bytes) -> "ScriptSection | None":
+    """Recognise a ``#!python`` / ``#!pythonw`` placeholder shebang line.
+
+    The wheel format uses these placeholders (see the wheel spec's notes on
+    shebang lines) to ask the installer to substitute the interpreter it was
+    explicitly told to use. No other shebang is ever modified, so a script
+    that already names a real interpreter (e.g. ``#!/bin/sh``) is preserved.
+
+    :param line: the first line of a script, including any line ending
+    :return: ``"console"`` for ``#!python``, ``"gui"`` for ``#!pythonw``, or
+        ``None`` if the line is not a placeholder.
+    """
+    match = _PLACEHOLDER_SHEBANG_RE.match(line.rstrip(b"\r\n"))
+    if match is None:
+        return None
+    return "gui" if match.group(1) == b"pythonw" else "console"
+
+
+def get_gui_executable(executable: str) -> str:
+    """Get the windowed (GUI) interpreter corresponding to ``executable``.
+
+    On Windows, ``python.exe`` and ``pythonw.exe`` live side by side, so the
+    GUI launcher is derived directly from the explicitly-provided interpreter
+    path. ``PATH`` is never consulted.
+    """
+    dn, fn = os.path.split(executable)
+    fn = fn.replace("python", "pythonw")
+    return os.path.join(dn, fn)  # noqa: PTH118
+
+
+def _is_executable_simple(executable: bytes) -> bool:
+    if b" " in executable:
+        return False
+    shebang_length = len(executable) + 3  # Prefix #! and newline after.
+    # According to distlib, Darwin can handle up to 512 characters. But I want
+    # to avoid platform sniffing to make this as platform-agnostic as possible.
+    # The "complex" script isn't that bad anyway.
+    return shebang_length <= 127
+
+
+def build_shebang(
+    executable: str,
+    kind: "LauncherKind",
+    *,
+    gui: bool = False,
+    forlauncher: bool = False,
+) -> bytes:
+    """Build a shebang line that invokes ``executable``.
+
+    :param executable: Explicit path to the interpreter to invoke. It is used
+        verbatim -- this function never searches ``PATH`` for an interpreter.
+    :param kind: The platform the generated script is meant for (``"posix"``
+        or one of the Windows ``"win-*"`` kinds).
+    :param gui: Whether a windowed (``pythonw``) interpreter is required.
+        Only meaningful for the Windows kinds.
+    :param forlauncher: Whether the shebang will be embedded into a Windows
+        launcher stub. Such launchers consume the command as-is.
+
+    When the interpreter path contains spaces, a platform-supported wrapper
+    is produced: a ``/bin/sh`` wrapper on POSIX, and a quoted command for the
+    Windows launcher (whose shebang parser understands quotes).
+    """
+    if gui and kind != "posix":
+        executable = get_gui_executable(executable)
+
+    executable_bytes = executable.encode("utf-8")
+    if forlauncher:  # The launcher can just use the command as-is.
+        return b"#!" + executable_bytes
+    if kind != "posix":
+        # Wheel-installed scripts on Windows are read by the launcher-style
+        # interpreter resolution, which accepts a quoted command when the
+        # path contains spaces.
+        if b" " in executable_bytes:
+            executable_bytes = b'"' + executable_bytes + b'"'
+        return b"#!" + executable_bytes
+    if _is_executable_simple(executable_bytes):
+        return b"#!" + executable_bytes
+
+    # Shebang support for an executable with a space in it is under-specified
+    # and platform-dependent, so we use a clever hack to generate a script to
+    # run in ``/bin/sh`` that should work on all reasonably modern platforms.
+    # Read the following message to understand how the hack works:
+    # https://github.com/pypa/installer/pull/4#issuecomment-623668717
+
+    quoted = shlex.quote(executable).encode("utf-8")
+    # I don't understand a lick what this is trying to do.
+    return b"#!/bin/sh\n'''exec' " + quoted + b' "$0" "$@"\n' + b"' '''"
 
 
 class InvalidScript(ValueError):
@@ -77,17 +179,6 @@ class Script:
             raise InvalidScript(error) from None
         return (files(_scripts) / name).read_bytes()
 
-    def _get_alternate_executable(self, executable: str, kind: "LauncherKind") -> str:
-        """Get an alternate executable for the launcher.
-
-        On Windows, when the script section is gui-script, pythonw.exe should be used.
-        """
-        if self.section == "gui" and kind != "posix":
-            dn, fn = os.path.split(executable)
-            fn = fn.replace("python", "pythonw")
-            executable = os.path.join(dn, fn)  # noqa: PTH118
-        return executable
-
     def generate(self, executable: str, kind: "LauncherKind") -> tuple[str, bytes]:
         """Generate a launcher for this script.
 
@@ -101,8 +192,12 @@ class Script:
         :return: The name and contents of the launcher file.
         """
         launcher = self._get_launcher_data(kind)
-        executable = self._get_alternate_executable(executable, kind)
-        shebang = self._build_shebang(executable, forlauncher=bool(launcher))
+        shebang = build_shebang(
+            executable,
+            kind,
+            gui=self.section == "gui",
+            forlauncher=bool(launcher),
+        )
         code = _SCRIPT_TEMPLATE.format(
             module=self.module,
             import_name=self.attr.split(".")[0],
@@ -118,37 +213,3 @@ class Script:
         name = f"{self.name}.exe"
         data = launcher + shebang + b"\n" + stream.getvalue()
         return name, data
-
-    @staticmethod
-    def _is_executable_simple(executable: bytes) -> bool:
-        if b" " in executable:
-            return False
-        shebang_length = len(executable) + 3  # Prefix #! and newline after.
-        # According to distlib, Darwin can handle up to 512 characters. But I want
-        # to avoid platform sniffing to make this as platform-agnostic as possible.
-        # The "complex" script isn't that bad anyway.
-        return shebang_length <= 127
-
-    def _build_shebang(self, executable: str, forlauncher: bool) -> bytes:
-        """Build a shebang line.
-
-        The non-launcher cases are taken directly from distlib's implementation,
-        which tries its best to account for command length, spaces in path, etc.
-
-        https://bitbucket.org/pypa/distlib/src/58cd5c6/distlib/scripts.py#lines-124
-        """
-        executable_bytes = executable.encode("utf-8")
-        if forlauncher:  # The launcher can just use the command as-is.
-            return b"#!" + executable_bytes
-        if self._is_executable_simple(executable_bytes):
-            return b"#!" + executable_bytes
-
-        # Shebang support for an executable with a space in it is under-specified
-        # and platform-dependent, so we use a clever hack to generate a script to
-        # run in ``/bin/sh`` that should work on all reasonably modern platforms.
-        # Read the following message to understand how the hack works:
-        # https://github.com/pypa/installer/pull/4#issuecomment-623668717
-
-        quoted = shlex.quote(executable).encode("utf-8")
-        # I don't understand a lick what this is trying to do.
-        return b"#!/bin/sh\n'''exec' " + quoted + b' "$0" "$@"\n' + b"' '''"

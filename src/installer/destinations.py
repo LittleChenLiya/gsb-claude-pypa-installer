@@ -2,8 +2,9 @@
 
 import io
 import os
+import shutil
 from collections.abc import Collection, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -97,6 +98,17 @@ class WheelDestination:
         """
         raise NotImplementedError
 
+    def finalize_installation_failed(self) -> None:
+        """Clean up after a failed installation.
+
+        Called by :func:`installer.install` when installation does not reach
+        :any:`finalize_installation` due to an error. Implementations should
+        remove anything written *during this installation attempt* and leave
+        pre-existing files (i.e. a prior installation) untouched.
+
+        The default implementation does nothing.
+        """
+
 
 @dataclass
 class SchemeDictionaryDestination(WheelDestination):
@@ -134,6 +146,16 @@ class SchemeDictionaryDestination(WheelDestination):
 
     overwrite_existing: bool = False
     """Silently overwrite existing files."""
+
+    _written_files: dict[Path, bytes | None] = field(default_factory=dict, repr=False)
+    """Files created or overwritten during the current installation.
+
+    A value of ``None`` means the file did not exist beforehand and should be
+    removed on rollback; otherwise it holds the original contents to restore.
+    """
+
+    _created_directories: set[Path] = field(default_factory=set, repr=False)
+    """Directories created during the current installation."""
 
     def _path_with_destdir(self, scheme: Scheme, path: str) -> Path:
         # See https://docs.python.org/3/library/zipfile.html#zipfile.Path:
@@ -177,20 +199,41 @@ class SchemeDictionaryDestination(WheelDestination):
         - Hashes the written content, to determine the entry in the ``RECORD`` file.
         """
         target_path = self._path_with_destdir(scheme, path)
-        if not self.overwrite_existing and target_path.exists():
+
+        pre_existed = target_path.exists()
+        if not self.overwrite_existing and pre_existed:
             message = f"File already exists: {target_path!s}"
             raise FileExistsError(message)
 
+        # Track the change so a failed installation can be undone: newly
+        # created files are removed, overwritten ones are restored.
+        if target_path not in self._written_files:
+            self._written_files[target_path] = (
+                target_path.read_bytes() if pre_existed else None
+            )
+
         parent_folder = target_path.parent
+        # Only track directories that did not exist before this installation.
+        to_create = parent_folder
+        while not to_create.exists():
+            self._created_directories.add(to_create)
+            parent = to_create.parent
+            if parent == to_create or parent.exists():
+                break
+            to_create = parent
         if not parent_folder.exists():
             parent_folder.mkdir(parents=True)
 
         with target_path.open("wb") as f:
-            hash_, size = copyfileobj_with_hashing(stream, f, self.hash_algorithm)
+            hash_, _stream_size = copyfileobj_with_hashing(
+                stream, f, self.hash_algorithm
+            )
 
         if is_executable:
             make_file_executable(target_path)
 
+        # Use the final on-disk size, so RECORD always agrees with the file.
+        size = target_path.stat().st_size
         return RecordEntry(path, Hash(self.hash_algorithm, hash_), size)
 
     def write_file(
@@ -214,7 +257,9 @@ class SchemeDictionaryDestination(WheelDestination):
         path_ = os.fspath(path)
 
         if scheme == "scripts":
-            with fix_shebang(stream, self.interpreter) as stream_with_different_shebang:
+            with fix_shebang(
+                stream, self.interpreter, self.script_kind
+            ) as stream_with_different_shebang:
                 return self.write_to_fs(
                     scheme, path_, stream_with_different_shebang, is_executable
                 )
@@ -304,3 +349,38 @@ class SchemeDictionaryDestination(WheelDestination):
 
         for scheme_, record in record_list:
             self._compile_bytecode(scheme_, record)
+
+        # Installation completed: nothing to clean up anymore.
+        self._written_files.clear()
+        self._created_directories.clear()
+
+    def finalize_installation_failed(self) -> None:
+        """Undo everything written by the failed installation attempt.
+
+        Files that already existed before the attempt are restored to their
+        original contents; files created during the attempt are removed,
+        along with any directories created for them. Nothing outside of this
+        attempt is touched.
+        """
+        # Restore / remove files, deepest paths first.
+        for target_path in sorted(
+            self._written_files, key=lambda p: len(p.parts), reverse=True
+        ):
+            original = self._written_files[target_path]
+            try:
+                if original is None:
+                    target_path.unlink()
+                else:
+                    target_path.write_bytes(original)
+            except FileNotFoundError:
+                pass
+
+        # Remove directories created during this attempt, deepest first and
+        # only while empty -- pre-existing directories are left alone.
+        for directory in sorted(
+            self._created_directories, key=lambda p: len(p.parts), reverse=True
+        ):
+            shutil.rmtree(directory, ignore_errors=True)
+
+        self._written_files.clear()
+        self._created_directories.clear()

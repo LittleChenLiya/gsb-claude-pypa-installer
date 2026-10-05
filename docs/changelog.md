@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Use an explicit script interpreter strategy: only the ``#!python`` and
+  ``#!pythonw`` placeholder shebangs are rewritten, always with the
+  interpreter passed in (``PATH`` is never searched). ``#!pythonw`` selects
+  the windowed interpreter for the Windows launcher kinds, while other
+  shebangs (e.g. ``#!/bin/sh`` or ``#!python3``) are preserved verbatim.
+- Generate a platform-supported wrapper when the interpreter path contains
+  spaces (a ``/bin/sh`` wrapper on POSIX, a quoted command on Windows), and
+  preserve the rest of the script byte-for-byte.
+- On a failed installation, remove files written by that attempt and restore
+  any pre-existing files that were overwritten; earlier installations are
+  left untouched.
+- Compute each ``RECORD`` size from the final on-disk file, so the summary
+  always matches the installed bytes.
 - Use `os.path.commonpath` instead of `os.path.commonprefix` to address deprecation
   warnings on Python 3.15 (#345)
 

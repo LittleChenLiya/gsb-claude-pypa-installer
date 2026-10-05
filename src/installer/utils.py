@@ -172,33 +172,65 @@ def get_launcher_kind() -> "LauncherKind":  # pragma: no cover
 
 
 @contextlib.contextmanager
-def fix_shebang(stream: BinaryIO, interpreter: str) -> Iterator[BinaryIO]:
-    """Replace ``#!python`` shebang in a stream with the correct interpreter.
+def fix_shebang(
+    stream: BinaryIO, interpreter: str, kind: "LauncherKind" = "posix"
+) -> Iterator[BinaryIO]:
+    """Replace a ``#!python``/``#!pythonw`` placeholder with ``interpreter``.
+
+    Only the placeholder shebangs recognised by the wheel format are
+    rewritten:
+
+    - ``#!python`` becomes the explicitly-provided console interpreter;
+    - ``#!pythonw`` becomes the matching windowed interpreter, for the
+      Windows kinds only.
+
+    Anything else (including a real shebang such as ``#!/bin/sh``, or
+    ``#!python3``) is passed through byte-for-byte. The interpreter is used
+    exactly as given -- ``PATH`` is never searched. An interpreter path with
+    spaces gets a platform-supported wrapper (see
+    :func:`installer.scripts.build_shebang`). The remainder of the script is
+    always preserved verbatim.
 
     :param stream: stream to modify
-    :param interpreter: "correct interpreter" to substitute the shebang with
+    :param interpreter: interpreter to substitute the placeholder with
+    :param kind: platform the script is being installed for
 
     :returns: A context manager, that provides an appropriately modified stream.
     """
+    # Local import to avoid a circular import (scripts imports installer only).
+    from installer.scripts import build_shebang, parse_placeholder_shebang
+
     stream.seek(0)
-    if stream.read(8) == b"#!python":
-        new_stream = io.BytesIO()
-        # write our new shebang
-        new_stream.write(f"#!{interpreter}\n".encode())
-        # copy the rest of the stream
-        stream.seek(0)
-        stream.readline()  # skip first line
-        while True:
-            buf = stream.read(_COPY_BUFSIZE)
-            if not buf:
-                break
-            new_stream.write(buf)
-        new_stream.seek(0)
-        yield new_stream
-        new_stream.close()
-    else:
+    first_line = stream.readline()
+    section = parse_placeholder_shebang(first_line)
+
+    if section is None:
+        # Not a placeholder: preserve the original contents exactly.
         stream.seek(0)
         yield stream
+        return
+
+    new_stream = io.BytesIO()
+    # Reconstruct the first line ending; use "\n" when the placeholder was
+    # the whole file or not terminated, matching the old behaviour.
+    line_ending = b"\r\n" if first_line.endswith(b"\r\n") else b"\n"
+    new_stream.write(
+        build_shebang(
+            interpreter,
+            kind,
+            gui=section == "gui",
+        )
+        + line_ending
+    )
+    # Copy the rest of the stream verbatim, so the script body is untouched.
+    while True:
+        buf = stream.read(_COPY_BUFSIZE)
+        if not buf:
+            break
+        new_stream.write(buf)
+    new_stream.seek(0)
+    yield new_stream
+    new_stream.close()
 
 
 def construct_record_file(
