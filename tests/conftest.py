@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import textwrap
 import zipfile
 
@@ -14,9 +16,18 @@ def another_fancy_wheel(tmp_path):
     return mock_wheel(tmp_path, "another_fancy")
 
 
+def _b64_nopad(data: bytes) -> str:
+    """Return the URL-safe base64 (no padding) SHA-256 digest of ``data``."""
+    return (
+        base64.urlsafe_b64encode(hashlib.sha256(data).digest())
+        .decode("ascii")
+        .rstrip("=")
+    )
+
+
 def mock_wheel(tmp_path, name):
     path = tmp_path / f"{name}-1.0.0-py2.py3-none-any.whl"
-    files = {
+    raw_files = {
         f"{name}/": b"""""",
         f"{name}/__init__.py": b"""\
             def main():
@@ -60,23 +71,26 @@ def mock_wheel(tmp_path, name):
             Platform: UNKNOWN
             Classifier: Intended Audience :: Developers
         """.encode(),
-        f"{name}-1.0.0.dist-info/RECORD": f"""\
-            {name}/__init__.py,sha256=qZ2qq7xVBAiUFQVv-QBHhdtCUF5p1NsWwSOiD7qdHN0,36
-            {name}/__main__.py,sha256=Wd4SyWJOIMsHf_5-0oN6aNFwen8ehJnRo-erk2_K-eY,61
-            {name}-1.0.0.data/data/{name}/data.py,sha256=nuFRUNQF5vP7FWE-v5ysyrrfpIaAvfzSiGOgfPpLOeI,17
-            {name}-1.0.0.dist-info/top_level.txt,sha256=SW-yrrF_c8KlserorMw54inhLjZ3_YIuLz7fYT4f8ao,6
-            {name}-1.0.0.dist-info/entry_points.txt,sha256=AxJl21_zgoNWjCfvSkC9u_rWSzGyCtCzhl84n979jCc,75
-            {name}-1.0.0.dist-info/WHEEL,sha256=1DrXMF1THfnBjsdS5sZn-e7BKcmUn7jnMbShGeZomgc,84
-            {name}-1.0.0.dist-info/METADATA,sha256=hRhZavK_Y6WqKurFFAABDnoVMjZFBH0NJRjwLOutnJI,236
-            {name}-1.0.0.dist-info/RECORD,,
-        """.encode(),
     }
 
+    # Normalize content (dedent + encode) and compute RECORD hashes dynamically
+    # so the fixture is valid for any distribution name.
+    files = {}
+    for filename, indented_content in raw_files.items():
+        files[filename] = textwrap.dedent(indented_content.decode("utf-8")).encode(
+            "utf-8"
+        )
+
+    record_lines = []
+    for filename, content in files.items():
+        if filename.endswith("/"):  # directory entries are not in RECORD
+            continue
+        record_lines.append(f"{filename},sha256={_b64_nopad(content)},{len(content)}")
+    record_lines.append(f"{name}-1.0.0.dist-info/RECORD,,")
+    files[f"{name}-1.0.0.dist-info/RECORD"] = "\n".join(record_lines).encode("utf-8")
+
     with zipfile.ZipFile(path, "w") as archive:
-        for filename, indented_content in files.items():
-            archive.writestr(
-                filename,
-                textwrap.dedent(indented_content.decode("utf-8")).encode("utf-8"),
-            )
+        for filename, content in files.items():
+            archive.writestr(filename, content)
 
     return path
