@@ -62,6 +62,27 @@ def _determine_scheme(
     return cast("Scheme", scheme_name), posixpath.join(*reversed(parts[:-1]))
 
 
+def _validate_record(source: WheelSource, record_file_path: str) -> None:
+    """Validate that the contents of ``source`` match its ``RECORD`` file.
+
+    Every regular file's actual size and digest are checked against its
+    ``RECORD`` entry. The ``RECORD`` file's own entry is exempt when its hash
+    and size are empty, since that is what the specification requires.
+    """
+    for record_elements, stream, _ in source.get_contents():
+        record = RecordEntry.from_elements(*record_elements)
+        if (
+            record.path == record_file_path
+            and record.hash_ is None
+            and record.size is None
+        ):
+            # RECORD's own entry legitimately has an empty hash and size.
+            continue
+        if not record.validate_stream(stream):
+            message = f"RECORD validation failed for {record.path}: hash / size mismatch."
+            raise InvalidWheelSource(source, message)
+
+
 def install(
     source: WheelSource,
     destination: WheelDestination,
@@ -80,6 +101,9 @@ def install(
     # RECORD handling
     record_file_path = posixpath.join(source.dist_info_dir, "RECORD")
     written_records = []
+
+    # Validate the wheel's RECORD before writing anything to the destination.
+    _validate_record(source, record_file_path)
 
     # Write the entry_points based scripts.
     if "entry_points.txt" in source.dist_info_filenames:

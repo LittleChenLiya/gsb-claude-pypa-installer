@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import textwrap
 from io import BytesIO
@@ -15,7 +16,8 @@ from installer.sources import WheelSource
 # Helpers
 # --------------------------------------------------------------------------------------
 def hash_and_size(data):
-    return hashlib.sha256(data).hexdigest(), len(data)
+    digest = hashlib.sha256(data).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("="), len(data)
 
 
 @pytest.fixture
@@ -872,9 +874,11 @@ class TestInstall:
                 """,
             },
         )
-        all_contents = list(source.get_contents())
+        all_contents = [
+            (record, stream.read()) for record, stream, _ in source.get_contents()
+        ]
         source.get_contents = lambda: (
-            (*contents, True) for (*contents, _) in all_contents
+            (record, BytesIO(content), True) for record, content in all_contents
         )
         install(
             source=source,
