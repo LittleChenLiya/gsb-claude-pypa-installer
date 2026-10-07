@@ -15,6 +15,7 @@ from installer.records import Hash, RecordEntry
 from installer.scripts import Script
 from installer.utils import (
     _WINDOWS,
+    DEFAULT_SCRIPT_NEWLINE,
     Scheme,
     construct_record_file,
     copyfileobj_with_hashing,
@@ -24,6 +25,7 @@ from installer.utils import (
 
 if TYPE_CHECKING:
     from installer.scripts import LauncherKind, ScriptSection
+    from installer.utils import ScriptNewline
 
 
 class WheelDestination:
@@ -135,6 +137,14 @@ class SchemeDictionaryDestination(WheelDestination):
     overwrite_existing: bool = False
     """Silently overwrite existing files."""
 
+    script_newline: "ScriptNewline" = DEFAULT_SCRIPT_NEWLINE
+    """
+    Newline strategy for scripts in the "scripts" scheme, whose shebang is
+    rewritten during installation. One of ``"preserve"`` (the default, which
+    keeps the historical behaviour), ``"lf"`` or ``"crlf"``. See
+    :any:`installer.utils.fix_shebang` for details.
+    """
+
     def _path_with_destdir(self, scheme: Scheme, path: str) -> Path:
         # See https://docs.python.org/3/library/zipfile.html#zipfile.Path:
         #  When handling untrusted archives,
@@ -214,7 +224,9 @@ class SchemeDictionaryDestination(WheelDestination):
         path_ = os.fspath(path)
 
         if scheme == "scripts":
-            with fix_shebang(stream, self.interpreter) as stream_with_different_shebang:
+            with fix_shebang(
+                stream, self.interpreter, newline=self.script_newline
+            ) as stream_with_different_shebang:
                 return self.write_to_fs(
                     scheme, path_, stream_with_different_shebang, is_executable
                 )

@@ -118,6 +118,45 @@ class TestSchemeDictionaryDestination:
         assert file_data == expected_data
         assert record.path == "my_entrypoint"
 
+    @pytest.mark.parametrize(
+        ("script_newline", "data", "expected"),
+        [
+            pytest.param(
+                "preserve",
+                b"#!python\r\nmy script\r\n",
+                b"#!/my/python\nmy script\r\n",
+                id="preserve",
+            ),
+            pytest.param(
+                "crlf",
+                b"#!python\r\nmy script\r\n",
+                b"#!/my/python\r\nmy script\r\n",
+                id="crlf",
+            ),
+            pytest.param(
+                "lf",
+                b"#!python\r\nmy script\r\n",
+                b"#!/my/python\nmy script\n",
+                id="lf",
+            ),
+        ],
+    )
+    def test_write_file_scripts_newline_strategy(
+        self, destination, script_newline, data, expected
+    ):
+        destination.script_newline = script_newline
+        record = destination.write_file(
+            "scripts", "my_script", io.BytesIO(data), is_executable=False
+        )
+
+        file_data = (
+            Path(destination.scheme_dict["scripts"]) / "my_script"
+        ).read_bytes()
+        assert file_data == expected
+        # The RECORD entry is computed from the final script contents.
+        assert record.validate(file_data)
+        assert record.size == len(expected)
+
     def test_finalize_write_record(self, destination):
         records = [
             (

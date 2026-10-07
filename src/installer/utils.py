@@ -23,13 +23,23 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from typing import Literal
+
     from installer.records import RecordEntry
     from installer.scripts import LauncherKind, ScriptSection
+
+    ScriptNewline = Literal["preserve", "lf", "crlf"]
 
 Scheme = NewType("Scheme", str)
 AllSchemes = tuple[Scheme, ...]
 
+#: Default newline strategy for generated scripts: keep the historical
+#: behaviour of :any:`fix_shebang` (LF-terminated shebang, remaining bytes
+#: copied verbatim).
+DEFAULT_SCRIPT_NEWLINE: "ScriptNewline" = "preserve"
+
 __all__ = [
+    "DEFAULT_SCRIPT_NEWLINE",
     "SCHEME_NAMES",
     "WheelFilename",
     "construct_record_file",
@@ -172,33 +182,58 @@ def get_launcher_kind() -> "LauncherKind":  # pragma: no cover
 
 
 @contextlib.contextmanager
-def fix_shebang(stream: BinaryIO, interpreter: str) -> Iterator[BinaryIO]:
+def fix_shebang(
+    stream: BinaryIO,
+    interpreter: str,
+    newline: "ScriptNewline" = DEFAULT_SCRIPT_NEWLINE,
+) -> Iterator[BinaryIO]:
     """Replace ``#!python`` shebang in a stream with the correct interpreter.
 
     :param stream: stream to modify
     :param interpreter: "correct interpreter" to substitute the shebang with
+    :param newline:
+        newline strategy for the generated script; one of:
+
+        - ``"preserve"`` (the default): historical behaviour -- write an
+          LF-terminated shebang line and copy the rest of the stream
+          byte-for-byte.
+        - ``"lf"``: normalise all line endings in the script to LF.
+        - ``"crlf"``: normalise all line endings in the script to CRLF.
+
+        Only the shebang line is ever rewritten; all other original bytes
+        are preserved, modulo the requested newline conversion.
 
     :returns: A context manager, that provides an appropriately modified stream.
     """
+    if newline not in ("preserve", "lf", "crlf"):
+        msg = f"Invalid newline strategy: {newline!r}"
+        raise ValueError(msg)
+
     stream.seek(0)
-    if stream.read(8) == b"#!python":
-        new_stream = io.BytesIO()
-        # write our new shebang
-        new_stream.write(f"#!{interpreter}\n".encode())
-        # copy the rest of the stream
-        stream.seek(0)
-        stream.readline()  # skip first line
-        while True:
-            buf = stream.read(_COPY_BUFSIZE)
-            if not buf:
-                break
-            new_stream.write(buf)
-        new_stream.seek(0)
-        yield new_stream
-        new_stream.close()
-    else:
+    if stream.read(8) != b"#!python":
         stream.seek(0)
         yield stream
+        return
+
+    newline_bytes = b"\r\n" if newline == "crlf" else b"\n"
+
+    new_stream = io.BytesIO()
+    # write our new shebang
+    new_stream.write(b"#!" + interpreter.encode("utf-8") + newline_bytes)
+    # copy the rest of the stream, preserving the original bytes
+    stream.seek(0)
+    stream.readline()  # skip first line
+    rest = stream.read()
+    if newline != "preserve":
+        # Normalise all newlines in the remaining content to LF first...
+        rest = rest.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        if newline == "crlf":
+            # ... then convert to CRLF, when requested.
+            rest = rest.replace(b"\n", b"\r\n")
+    new_stream.write(rest)
+    new_stream.seek(0)
+    yield new_stream
+    new_stream.close()
 
 
 def construct_record_file(

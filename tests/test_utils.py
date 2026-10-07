@@ -190,6 +190,88 @@ class TestScript:
             result = stream.read()
         assert result == data
 
+    def test_default_strategy_preserves_original_bytes(self):
+        # Short regression example for the original interface: with no
+        # explicit newline strategy, the shebang line is LF-terminated and
+        # every other original byte (including CRLFs) is kept as-is.
+        data = b"#!pythonw\r\nline1\r\nbinary \x00\xff bytes\r\n"
+        expected = b"#!/my/python\nline1\r\nbinary \x00\xff bytes\r\n"
+        with BytesIO(data) as source, fix_shebang(source, "/my/python") as stream:
+            result = stream.read()
+        assert result == expected
+
+    @pytest.mark.parametrize(
+        ("data", "newline", "expected"),
+        [
+            pytest.param(
+                b"#!python\r\nline1\r\nline2\r\n",
+                "preserve",
+                b"#!/my/python\nline1\r\nline2\r\n",
+                id="preserve-keeps-crlf-body",
+            ),
+            pytest.param(
+                b"#!python\r\nline1\r\nline2\r\n",
+                "crlf",
+                b"#!/my/python\r\nline1\r\nline2\r\n",
+                id="crlf",
+            ),
+            pytest.param(
+                b"#!python\nline1\nline2\n",
+                "crlf",
+                b"#!/my/python\r\nline1\r\nline2\r\n",
+                id="crlf-from-lf",
+            ),
+            pytest.param(
+                b"#!python\r\nline1\r\nline2\r\n",
+                "lf",
+                b"#!/my/python\nline1\nline2\n",
+                id="lf-from-crlf",
+            ),
+            pytest.param(
+                b"#!python\nline1\nline2\n",
+                "lf",
+                b"#!/my/python\nline1\nline2\n",
+                id="lf",
+            ),
+            pytest.param(
+                b"#!python\nmixed\r\nnewlines\rhere\n",
+                "crlf",
+                b"#!/my/python\r\nmixed\r\nnewlines\r\nhere\r\n",
+                id="crlf-from-mixed",
+            ),
+            pytest.param(
+                b"#!python\r\nbinary \x00\xff\r\nbytes\r",
+                "lf",
+                b"#!/my/python\nbinary \x00\xff\nbytes\n",
+                id="lf-keeps-other-bytes",
+            ),
+        ],
+    )
+    def test_replace_shebang_newline_strategies(self, data, newline, expected):
+        with (
+            BytesIO(data) as source,
+            fix_shebang(source, "/my/python", newline=newline) as stream,
+        ):
+            result = stream.read()
+        assert result == expected
+
+    def test_newline_strategy_does_not_touch_non_scripts(self):
+        data = b"#!something\r\ntest\r\n"
+        with (
+            BytesIO(data) as source,
+            fix_shebang(source, "/my/python", newline="crlf") as stream,
+        ):
+            result = stream.read()
+        assert result == data
+
+    def test_invalid_newline_strategy(self):
+        with (
+            BytesIO(b"#!python\ntest") as source,
+            pytest.raises(ValueError, match="Invalid newline strategy"),
+            fix_shebang(source, "/my/python", newline="bogus"),
+        ):
+            pass
+
 
 class TestConstructRecord:
     def test_construct(self):
