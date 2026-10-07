@@ -4,6 +4,10 @@
 
 - Use `os.path.commonpath` instead of `os.path.commonprefix` to address deprecation
   warnings on Python 3.15 (#345)
+- Add an opt-in ``check_case_collisions`` option to ``installer.install``, which
+  rejects a wheel before writing anything when installation targets (archive
+  files and generated scripts) would collide under Windows-style
+  case-insensitive path rules, raising ``installer.exceptions.CaseCollisionError``
 
 ## v1.0.1 (May 11, 2026)
 - Include docs and tests in sdist again (#322)

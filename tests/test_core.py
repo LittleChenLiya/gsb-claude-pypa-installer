@@ -1,4 +1,5 @@
 import hashlib
+import sys
 import textwrap
 from io import BytesIO
 from unittest import mock
@@ -6,9 +7,11 @@ from unittest import mock
 import pytest
 
 from installer import install
-from installer.exceptions import InvalidWheelSource
+from installer.destinations import SchemeDictionaryDestination
+from installer.exceptions import CaseCollisionError, InvalidWheelSource
 from installer.records import RecordEntry
 from installer.sources import WheelSource
+from installer.utils import SCHEME_NAMES, get_launcher_kind
 
 
 # --------------------------------------------------------------------------------------
@@ -987,3 +990,274 @@ class TestInstall:
         assert sub_good_path in record_paths
         assert top_pycache_path not in record_paths
         assert sub_pycache_path not in record_paths
+
+
+# --------------------------------------------------------------------------------------
+# Case-collision check tests
+# --------------------------------------------------------------------------------------
+def _fancy_source(*, regular_files, entry_points=None):
+    dist_info_files = {
+        "top_level.txt": b"""\
+            fancy
+        """,
+        "WHEEL": b"""\
+            Wheel-Version: 1.0
+            Generator: magic (1.0.0)
+            Root-Is-Purelib: true
+            Tag: py3-none-any
+        """,
+        "METADATA": b"""\
+            Metadata-Version: 2.1
+            Name: fancy
+            Version: 1.0.0
+        """,
+    }
+    if entry_points is not None:
+        dist_info_files["entry_points.txt"] = entry_points
+    return FakeWheelSource(
+        distribution="fancy",
+        version="1.0.0",
+        regular_files=regular_files,
+        dist_info_files=dist_info_files,
+    )
+
+
+class TestInstallCaseCollisionCheck:
+    def test_archive_case_collision_rejected_before_any_write(self, mock_destination):
+        source = _fancy_source(
+            regular_files={
+                "A.py": b"""\
+                    # uppercase
+                """,
+                "a.py": b"""\
+                    # lowercase
+                """,
+            },
+        )
+
+        with pytest.raises(CaseCollisionError) as ctx:
+            install(
+                source=source,
+                destination=mock_destination,
+                additional_metadata={},
+                check_case_collisions=True,
+            )
+
+        # The report mentions both source paths.
+        message = str(ctx.value)
+        assert '"A.py"' in message
+        assert '"a.py"' in message
+
+        # Nothing was written to the destination.
+        mock_destination.write_file.assert_not_called()
+        mock_destination.write_script.assert_not_called()
+        mock_destination.finalize_installation.assert_not_called()
+
+    def test_script_and_archive_cross_collision_rejected(self, mock_destination):
+        source = _fancy_source(
+            regular_files={
+                "fancy/__init__.py": b"""\
+                    def main():
+                        pass
+                """,
+                "fancy-1.0.0.data/scripts/FANCY": b"""\
+                    #!python
+                    print("hello")
+                """,
+            },
+            entry_points=b"""\
+                [console_scripts]
+                fancy = fancy:main
+            """,
+        )
+
+        with pytest.raises(CaseCollisionError) as ctx:
+            install(
+                source=source,
+                destination=mock_destination,
+                additional_metadata={},
+                check_case_collisions=True,
+            )
+
+        message = str(ctx.value)
+        assert 'script "fancy"' in message
+        assert '"fancy-1.0.0.data/scripts/FANCY"' in message
+
+        mock_destination.write_file.assert_not_called()
+        mock_destination.write_script.assert_not_called()
+        mock_destination.finalize_installation.assert_not_called()
+
+    def test_script_and_windows_exe_cross_collision_rejected(self, mock_destination):
+        source = _fancy_source(
+            regular_files={
+                "fancy/__init__.py": b"""\
+                    def main():
+                        pass
+                """,
+                "fancy-1.0.0.data/scripts/Fancy.EXE": b"""\
+                    mz
+                """,
+            },
+            entry_points=b"""\
+                [console_scripts]
+                fancy = fancy:main
+            """,
+        )
+
+        with pytest.raises(CaseCollisionError) as ctx:
+            install(
+                source=source,
+                destination=mock_destination,
+                additional_metadata={},
+                check_case_collisions=True,
+            )
+
+        message = str(ctx.value)
+        assert 'script "fancy"' in message
+        assert '"fancy-1.0.0.data/scripts/Fancy.EXE"' in message
+
+        mock_destination.write_file.assert_not_called()
+        mock_destination.write_script.assert_not_called()
+
+    def test_script_and_script_cross_collision_rejected(self, mock_destination):
+        source = _fancy_source(
+            regular_files={
+                "fancy/__init__.py": b"""\
+                    def main():
+                        pass
+                """,
+            },
+            entry_points=b"""\
+                [console_scripts]
+                Fancy = fancy:main
+
+                [gui_scripts]
+                fancy = fancy:main
+            """,
+        )
+
+        with pytest.raises(CaseCollisionError) as ctx:
+            install(
+                source=source,
+                destination=mock_destination,
+                additional_metadata={},
+                check_case_collisions=True,
+            )
+
+        message = str(ctx.value)
+        assert 'script "Fancy"' in message
+        assert 'script "fancy"' in message
+
+        mock_destination.write_file.assert_not_called()
+        mock_destination.write_script.assert_not_called()
+
+    def test_check_disabled_preserves_default_behavior(self, mock_destination):
+        # A.py/a.py would collide on a case-insensitive filesystem, but the
+        # default installation path (without the new option) is unchanged.
+        source = _fancy_source(
+            regular_files={
+                "A.py": b"""\
+                    # uppercase
+                """,
+                "a.py": b"""\
+                    # lowercase
+                """,
+            },
+        )
+
+        install(
+            source=source,
+            destination=mock_destination,
+            additional_metadata={},
+        )
+
+        written_files = {
+            kwargs.get("path")
+            for __, kwargs in mock_destination.write_file.call_args_list
+        }
+        assert "A.py" in written_files
+        assert "a.py" in written_files
+        assert mock_destination.finalize_installation.called
+
+    def test_rejected_install_leaves_target_directories_empty(self, tmp_path):
+        scheme_dict = {scheme: str(tmp_path / scheme) for scheme in SCHEME_NAMES}
+        destination = SchemeDictionaryDestination(
+            scheme_dict=scheme_dict,
+            interpreter=sys.executable,
+            script_kind=get_launcher_kind(),
+        )
+        source = _fancy_source(
+            regular_files={
+                "A.py": b"""\
+                    # uppercase
+                """,
+                "a.py": b"""\
+                    # lowercase
+                """,
+                "fancy-1.0.0.data/scripts/FANCY": b"""\
+                    #!python
+                    print("hello")
+                """,
+            },
+            entry_points=b"""\
+                [console_scripts]
+                fancy = fancy:main
+            """,
+        )
+
+        with pytest.raises(CaseCollisionError):
+            install(
+                source=source,
+                destination=destination,
+                additional_metadata={},
+                check_case_collisions=True,
+            )
+
+        # The failure happened before any target was written.
+        assert list(tmp_path.rglob("*")) == []
+
+    def test_no_collision_installs_and_writes_record(self, tmp_path):
+        scheme_dict = {scheme: str(tmp_path / scheme) for scheme in SCHEME_NAMES}
+        destination = SchemeDictionaryDestination(
+            scheme_dict=scheme_dict,
+            interpreter=sys.executable,
+            script_kind=get_launcher_kind(),
+        )
+        source = _fancy_source(
+            regular_files={
+                "fancy/__init__.py": b"""\
+                    def main():
+                        print("I am a fancy package")
+                """,
+            },
+            entry_points=b"""\
+                [console_scripts]
+                fancy = fancy:main
+            """,
+        )
+
+        install(
+            source=source,
+            destination=destination,
+            additional_metadata={
+                "fun_file.txt": b"this should be in dist-info!",
+            },
+            check_case_collisions=True,
+        )
+
+        # The package files were installed.
+        assert (tmp_path / "purelib" / "fancy" / "__init__.py").is_file()
+        assert (tmp_path / "purelib" / "fancy-1.0.0.dist-info" / "METADATA").is_file()
+        assert (
+            tmp_path / "purelib" / "fancy-1.0.0.dist-info" / "fun_file.txt"
+        ).is_file()
+        assert list((tmp_path / "scripts").iterdir())
+
+        # A normal RECORD file was generated, covering all installed files.
+        record_path = tmp_path / "purelib" / "fancy-1.0.0.dist-info" / "RECORD"
+        assert record_path.is_file()
+        record_text = record_path.read_text(encoding="utf-8")
+        assert "fancy/__init__.py,sha256=" in record_text
+        assert "fancy-1.0.0.dist-info/METADATA,sha256=" in record_text
+        assert "fancy-1.0.0.dist-info/fun_file.txt,sha256=" in record_text
+        assert "fancy-1.0.0.dist-info/RECORD,," in record_text
