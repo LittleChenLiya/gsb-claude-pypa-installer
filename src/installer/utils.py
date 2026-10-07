@@ -23,8 +23,12 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from typing import Literal
+
     from installer.records import RecordEntry
     from installer.scripts import LauncherKind, ScriptSection
+
+    ScriptNewline = Literal["preserve", "lf", "crlf"]
 
 Scheme = NewType("Scheme", str)
 AllSchemes = tuple[Scheme, ...]
@@ -172,22 +176,38 @@ def get_launcher_kind() -> "LauncherKind":  # pragma: no cover
 
 
 @contextlib.contextmanager
-def fix_shebang(stream: BinaryIO, interpreter: str) -> Iterator[BinaryIO]:
-    """Replace ``#!python`` shebang in a stream with the correct interpreter.
+def fix_shebang(
+    stream: BinaryIO,
+    interpreter: str,
+    newline: "ScriptNewline | None" = None,
+) -> Iterator[BinaryIO]:
+    r"""Replace ``#!python`` shebang in a stream with the correct interpreter.
 
     :param stream: stream to modify
     :param interpreter: "correct interpreter" to substitute the shebang with
+    :param newline:
+        newline policy for the rewritten shebang line. ``None`` (the default)
+        keeps the historical behaviour of always using ``\n``; ``"lf"`` and
+        ``"crlf"`` force the corresponding line ending; ``"preserve"`` reuses
+        the line ending of the original shebang line. The bytes after the
+        first line are always preserved as-is.
 
     :returns: A context manager, that provides an appropriately modified stream.
     """
     stream.seek(0)
     if stream.read(8) == b"#!python":
+        stream.seek(0)
+        first_line = stream.readline()  # skip first line
+        if newline == "preserve":
+            newline_bytes = b"\r\n" if first_line.endswith(b"\r\n") else b"\n"
+        elif newline == "crlf":
+            newline_bytes = b"\r\n"
+        else:  # None or "lf": the historical behaviour
+            newline_bytes = b"\n"
         new_stream = io.BytesIO()
         # write our new shebang
-        new_stream.write(f"#!{interpreter}\n".encode())
+        new_stream.write(b"#!" + interpreter.encode() + newline_bytes)
         # copy the rest of the stream
-        stream.seek(0)
-        stream.readline()  # skip first line
         while True:
             buf = stream.read(_COPY_BUFSIZE)
             if not buf:

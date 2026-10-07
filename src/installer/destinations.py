@@ -24,6 +24,7 @@ from installer.utils import (
 
 if TYPE_CHECKING:
     from installer.scripts import LauncherKind, ScriptSection
+    from installer.utils import ScriptNewline
 
 
 class WheelDestination:
@@ -135,6 +136,14 @@ class SchemeDictionaryDestination(WheelDestination):
     overwrite_existing: bool = False
     """Silently overwrite existing files."""
 
+    script_newline: "ScriptNewline | None" = None
+    """
+    Newline policy used when rewriting the shebang line of files in the
+    "scripts" scheme. ``None`` (the default) keeps the historical behaviour of
+    always using ``\\n``; ``"preserve"`` reuses the line ending of the original
+    shebang line; ``"lf"`` and ``"crlf"`` force the corresponding line ending.
+    """
+
     def _path_with_destdir(self, scheme: Scheme, path: str) -> Path:
         # See https://docs.python.org/3/library/zipfile.html#zipfile.Path:
         #  When handling untrusted archives,
@@ -214,7 +223,9 @@ class SchemeDictionaryDestination(WheelDestination):
         path_ = os.fspath(path)
 
         if scheme == "scripts":
-            with fix_shebang(stream, self.interpreter) as stream_with_different_shebang:
+            with fix_shebang(
+                stream, self.interpreter, newline=self.script_newline
+            ) as stream_with_different_shebang:
                 return self.write_to_fs(
                     scheme, path_, stream_with_different_shebang, is_executable
                 )

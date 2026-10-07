@@ -190,6 +190,67 @@ class TestScript:
             result = stream.read()
         assert result == data
 
+    @pytest.mark.parametrize(
+        "data",
+        [
+            b"#!python\ntest\n",
+            b"#!python\r\ntest\r\n",
+            b"#!python\r\n\x00\xffbinary\r\n\x01\x02",
+        ],
+        ids=["lf", "crlf", "crlf-binary"],
+    )
+    def test_replace_shebang_default_newline_is_lf(self, data):
+        """Regression: without an explicit policy, the shebang uses LF and the
+        remaining original bytes are kept as-is."""
+        _, _, rest = data.partition(b"\n")
+        expected = b"#!/my/python\n" + rest
+        with BytesIO(data) as source, fix_shebang(source, "/my/python") as stream:
+            result = stream.read()
+        assert result == expected
+
+    @pytest.mark.parametrize(
+        ("newline", "data", "expected"),
+        [
+            pytest.param(
+                "preserve",
+                b"#!python\r\nline\r\n\x00\xffend\r\n",
+                b"#!/my/python\r\nline\r\n\x00\xffend\r\n",
+                id="preserve-crlf",
+            ),
+            pytest.param(
+                "preserve",
+                b"#!python\nline\n\x00\xffend\n",
+                b"#!/my/python\nline\n\x00\xffend\n",
+                id="preserve-lf",
+            ),
+            pytest.param(
+                "preserve",
+                b"#!python",
+                b"#!/my/python\n",
+                id="preserve-no-newline",
+            ),
+            pytest.param(
+                "crlf",
+                b"#!python\nline\n",
+                b"#!/my/python\r\nline\n",
+                id="force-crlf-on-lf",
+            ),
+            pytest.param(
+                "lf",
+                b"#!python\r\nline\r\n",
+                b"#!/my/python\nline\r\n",
+                id="force-lf-on-crlf",
+            ),
+        ],
+    )
+    def test_replace_shebang_newline_policy(self, newline, data, expected):
+        with (
+            BytesIO(data) as source,
+            fix_shebang(source, "/my/python", newline=newline) as stream,
+        ):
+            result = stream.read()
+        assert result == expected
+
 
 class TestConstructRecord:
     def test_construct(self):
