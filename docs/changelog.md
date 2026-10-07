@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add an opt-in pre-installation target path collision check:
+  `installer.install(..., check_case_collisions=True)` and the
+  `--check-case-collisions` CLI flag. Planned targets (archive files and
+  generated entry point scripts, including cross-scheme cases) are checked
+  using Windows' case-insensitive rules and
+  `installer.exceptions.DestinationCollisionError` is raised before anything
+  is written. The default behaviour is unchanged.
 - Use `os.path.commonpath` instead of `os.path.commonprefix` to address deprecation
   warnings on Python 3.15 (#345)
 

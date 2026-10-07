@@ -88,6 +88,16 @@ class Script:
             executable = os.path.join(dn, fn)  # noqa: PTH118
         return executable
 
+    def target_name(self, kind: "LauncherKind") -> str:
+        """Get the name of the file that :py:meth:`generate` would produce.
+
+        :param kind: launcher kind (see :py:meth:`generate`)
+        :return: the script filename (with an ``.exe`` suffix on Windows kinds)
+        """
+        if kind == "posix":
+            return self.name
+        return f"{self.name}.exe"
+
     def generate(self, executable: str, kind: "LauncherKind") -> tuple[str, bytes]:
         """Generate a launcher for this script.
 
@@ -115,7 +125,7 @@ class Script:
         stream = io.BytesIO()
         with zipfile.ZipFile(stream, "w") as zf:
             zf.writestr("__main__.py", code)
-        name = f"{self.name}.exe"
+        name = self.target_name(kind)
         data = launcher + shebang + b"\n" + stream.getvalue()
         return name, data
 

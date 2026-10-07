@@ -6,6 +6,7 @@ from unittest import mock
 import pytest
 
 from installer import install
+from installer._core import PlannedTarget
 from installer.exceptions import InvalidWheelSource
 from installer.records import RecordEntry
 from installer.sources import WheelSource
@@ -987,3 +988,120 @@ class TestInstall:
         assert sub_good_path in record_paths
         assert top_pycache_path not in record_paths
         assert sub_pycache_path not in record_paths
+
+
+# --------------------------------------------------------------------------------------
+# Case-insensitive target path collision checks
+# --------------------------------------------------------------------------------------
+def _collision_fake_source():
+    return FakeWheelSource(
+        distribution="fancy",
+        version="1.0.0",
+        regular_files={
+            "A.py": b"top = 'uppercase'\n",
+            "a.py": b"top = 'lowercase'\n",
+        },
+        dist_info_files={
+            "WHEEL": b"""\
+                Wheel-Version: 1.0
+                Generator: magic (1.0.0)
+                Root-Is-Purelib: true
+                Tag: py3-none-any
+            """,
+            "METADATA": b"""\
+                Metadata-Version: 2.1
+                Name: fancy
+                Version: 1.0.0
+            """,
+            "entry_points.txt": b"""\
+                [console_scripts]
+                FOO = fancy:main
+            """,
+        },
+    )
+
+
+def test_case_collision_check_is_off_by_default(mock_destination):
+    source = _collision_fake_source()
+
+    install(source=source, destination=mock_destination, additional_metadata={})
+
+    # The check hook is never invoked when the option is not enabled...
+    mock_destination.check_target_collisions.assert_not_called()
+    # ...and the legacy interface still drives a normal install.
+    assert mock_destination.write_script.called
+    assert mock_destination.write_file.called
+    assert mock_destination.finalize_installation.called
+
+
+def test_case_collision_check_builds_plan_and_reports(mock_destination):
+    source = _collision_fake_source()
+
+    def fake_get_script_target(name, module, attr, section):
+        return ("scripts", name)
+
+    mock_destination.get_script_target.side_effect = fake_get_script_target
+
+    from installer.exceptions import DestinationCollisionError
+
+    collision = DestinationCollisionError("boom")
+    mock_destination.check_target_collisions.side_effect = collision
+
+    with pytest.raises(DestinationCollisionError):
+        install(
+            source=source,
+            destination=mock_destination,
+            additional_metadata={},
+            check_case_collisions=True,
+        )
+
+    # The destination received the full plan: two archive files plus the
+    # generated script, metadata and RECORD.
+    mock_destination.check_target_collisions.assert_called_once()
+    targets = mock_destination.check_target_collisions.call_args.args[0]
+    sources = {target.source for target in targets}
+    assert "A.py" in sources
+    assert "a.py" in sources
+    assert any("FOO" in source for source in sources)
+    assert "generated RECORD file" in sources
+
+    # Nothing was written.
+    mock_destination.write_script.assert_not_called()
+    mock_destination.write_file.assert_not_called()
+    mock_destination.finalize_installation.assert_not_called()
+
+
+def test_case_collision_check_passes_planned_targets_for_clean_wheel(
+    mock_destination,
+):
+    source = FakeWheelSource(
+        distribution="fancy",
+        version="1.0.0",
+        regular_files={"fancy/__init__.py": b"# put me in purelib\n"},
+        dist_info_files={
+            "WHEEL": b"""\
+                Wheel-Version: 1.0
+                Generator: magic (1.0.0)
+                Root-Is-Purelib: true
+                Tag: py3-none-any
+            """,
+            "METADATA": b"""\
+                Metadata-Version: 2.1
+                Name: fancy
+                Version: 1.0.0
+            """,
+        },
+    )
+    mock_destination.get_script_target.return_value = ("scripts", "fancy")
+
+    install(
+        source=source,
+        destination=mock_destination,
+        additional_metadata={},
+        check_case_collisions=True,
+    )
+
+    mock_destination.check_target_collisions.assert_called_once()
+    targets = mock_destination.check_target_collisions.call_args.args[0]
+    assert all(isinstance(target, PlannedTarget) for target in targets)
+    assert mock_destination.finalize_installation.called

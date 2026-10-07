@@ -1,3 +1,4 @@
+import hashlib
 import textwrap
 import zipfile
 
@@ -12,6 +13,67 @@ def fancy_wheel(tmp_path):
 @pytest.fixture
 def another_fancy_wheel(tmp_path):
     return mock_wheel(tmp_path, "another_fancy")
+
+
+@pytest.fixture
+def case_colliding_wheel(tmp_path):
+    """A wheel that only installs cleanly on a case-sensitive filesystem.
+
+    It contains both ``A.py`` and ``a.py`` (target collision inside purelib)
+    and, via a ``.data/scripts`` entry and a generated entry point script,
+    a second collision between the archive path ``FOO`` and the generated
+    script ``foo``.
+    """
+    return mock_case_colliding_wheel(tmp_path)
+
+
+def mock_case_colliding_wheel(tmp_path):
+    name = "collider"
+    version = "1.0.0"
+    path = tmp_path / f"{name}-{version}-py3-none-any.whl"
+    files = {
+        "A.py": b"top = 'uppercase'\n",
+        "a.py": b"top = 'lowercase'\n",
+        f"{name}-{version}.data/scripts/FOO": b"#!/bin/sh\necho FOO\n",
+        f"{name}-{version}.dist-info/WHEEL": b"""\
+            Wheel-Version: 1.0
+            Generator: magic (1.0.0)
+            Root-Is-Purelib: true
+            Tag: py3-none-any
+        """,
+        f"{name}-{version}.dist-info/METADATA": f"""\
+            Metadata-Version: 2.1
+            Name: {name}
+            Version: {version}
+        """.encode(),
+        f"{name}-{version}.dist-info/entry_points.txt": b"""\
+            [console_scripts]
+            foo = collider:main
+        """,
+        f"{name}-{version}.dist-info/top_level.txt": b"""\
+            A.py
+            a.py
+        """,
+    }
+
+    record_lines = []
+    written_files = {}
+    for filename, content in files.items():
+        data = textwrap.dedent(content.decode()).encode()
+        written_files[filename] = data
+        digest = hashlib.sha256(data).hexdigest()
+        record_lines.append(f"{filename},sha256={digest},{len(data)}")
+    record_lines.append(f"{name}-{version}.dist-info/RECORD,,")
+
+    with zipfile.ZipFile(path, "w") as archive:
+        for filename, data in written_files.items():
+            archive.writestr(filename, data)
+        archive.writestr(
+            f"{name}-{version}.dist-info/RECORD",
+            ("\n".join(record_lines) + "\n").encode(),
+        )
+
+    return path
 
 
 def mock_wheel(tmp_path, name):

@@ -3,7 +3,9 @@ from pathlib import Path
 
 import pytest
 
+from installer._core import PlannedTarget
 from installer.destinations import SchemeDictionaryDestination, WheelDestination
+from installer.exceptions import DestinationCollisionError
 from installer.records import RecordEntry
 from installer.scripts import Script
 from installer.utils import SCHEME_NAMES
@@ -30,6 +32,14 @@ class TestWheelDestination:
                 record_file_path=None,
                 records=None,
             )
+
+        with pytest.raises(NotImplementedError):
+            destination.get_script_target(
+                name=None, module=None, attr=None, section=None
+            )
+
+        with pytest.raises(NotImplementedError):
+            destination.check_target_collisions(targets=[])
 
 
 class TestSchemeDictionaryDestination:
@@ -197,3 +207,97 @@ class TestSchemeDictionaryDestination:
     def test_blocking_path_traversal(self, destination):
         with pytest.raises(ValueError):
             destination._path_with_destdir("purelib", "subdir/../../outside.txt")
+
+    def test_get_script_target_posix(self, destination):
+        assert destination.get_script_target("foo", "foo.cli", "main", "console") == (
+            "scripts",
+            "foo",
+        )
+
+    def test_get_script_target_windows(self, tmp_path):
+        scheme_dict = {scheme: str(tmp_path / scheme) for scheme in SCHEME_NAMES}
+        win_destination = SchemeDictionaryDestination(
+            scheme_dict, r"C:\Python\python.exe", "win-amd64"
+        )
+        assert win_destination.get_script_target(
+            "foo", "foo.cli", "main", "console"
+        ) == ("scripts", "foo.exe")
+
+    def test_check_target_collisions_accepts_distinct_targets(self, destination):
+        destination.check_target_collisions(
+            [
+                PlannedTarget("purelib", "pkg/A.py", "pkg/A.py"),
+                PlannedTarget("purelib", "pkg/b.py", "pkg/b.py"),
+                PlannedTarget("scripts", "foo", "entry point console script 'foo'"),
+            ]
+        )
+
+    def test_check_target_collisions_rejects_case_differences(self, destination):
+        with pytest.raises(DestinationCollisionError) as exc_info:
+            destination.check_target_collisions(
+                [
+                    PlannedTarget("purelib", "A.py", "A.py"),
+                    PlannedTarget("purelib", "a.py", "a.py"),
+                ]
+            )
+
+        message = str(exc_info.value)
+        assert "'A.py'" in message
+        assert "'a.py'" in message
+
+    def test_check_target_collisions_catches_archive_script_cross_conflict(
+        self, destination
+    ):
+        with pytest.raises(DestinationCollisionError) as exc_info:
+            destination.check_target_collisions(
+                [
+                    PlannedTarget(
+                        "scripts",
+                        "FOO",
+                        "collider-1.0.0.data/scripts/FOO",
+                    ),
+                    PlannedTarget(
+                        "scripts",
+                        "foo",
+                        "entry point console script 'foo'",
+                    ),
+                ]
+            )
+
+        message = str(exc_info.value)
+        assert "collider-1.0.0.data/scripts/FOO" in message
+        assert "entry point console script 'foo'" in message
+
+    def test_check_target_collisions_catches_cross_scheme_case_conflict(self, tmp_path):
+        # purelib and platlib pointing at the same root, as is common on
+        # Windows-style installs.
+        shared = tmp_path / "site-packages"
+        scripts = tmp_path / "scripts"
+        scheme_dict = {
+            "purelib": str(shared),
+            "platlib": str(shared),
+            "scripts": str(scripts),
+            "data": str(tmp_path / "data"),
+            "headers": str(tmp_path / "include"),
+        }
+        destination = SchemeDictionaryDestination(scheme_dict, "/my/python", "posix")
+
+        with pytest.raises(DestinationCollisionError):
+            destination.check_target_collisions(
+                [
+                    PlannedTarget("purelib", "pkg/Module.py", "pkg/Module.py"),
+                    PlannedTarget("platlib", "pkg/module.py", "pkg/module.py"),
+                ]
+            )
+
+    def test_check_target_collisions_writes_nothing(self, destination, tmp_path):
+        with pytest.raises(DestinationCollisionError):
+            destination.check_target_collisions(
+                [
+                    PlannedTarget("purelib", "A.py", "A.py"),
+                    PlannedTarget("purelib", "a.py", "a.py"),
+                ]
+            )
+
+        scheme_root = Path(destination.scheme_dict["purelib"])
+        assert not any(scheme_root.rglob("*"))

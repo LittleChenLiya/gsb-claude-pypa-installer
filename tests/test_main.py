@@ -4,6 +4,7 @@ import pytest
 
 from installer.__main__ import _get_scheme_dict as get_scheme_dict
 from installer.__main__ import _main as main
+from installer.exceptions import DestinationCollisionError
 
 
 def test_get_scheme_dict():
@@ -111,3 +112,32 @@ def test_main_validate_record_all_pass(fancy_wheel, tmp_path, validation_part):
         "__init__",
         "__main__",
     }
+
+
+def test_main_check_case_collisions_rejects(case_colliding_wheel, tmp_path):
+    destdir = tmp_path / "dest"
+
+    with pytest.raises(DestinationCollisionError) as exc_info:
+        main(
+            [str(case_colliding_wheel), "-d", str(destdir), "--check-case-collisions"],
+            "python -m installer",
+        )
+
+    assert "A.py" in str(exc_info.value)
+    assert "a.py" in str(exc_info.value)
+
+    # The pre-flight check runs before anything is written.
+    assert not destdir.exists() or not any(destdir.rglob("*"))
+
+
+def test_main_check_case_collisions_accepts_clean_wheel(fancy_wheel, tmp_path):
+    destdir = tmp_path / "dest"
+
+    main(
+        [str(fancy_wheel), "-d", str(destdir), "--check-case-collisions"],
+        "python -m installer",
+    )
+
+    installed_py_files = destdir.rglob("*.py")
+    assert {f.stem for f in installed_py_files} == {"__init__", "__main__", "data"}
+    assert list(destdir.rglob("RECORD"))

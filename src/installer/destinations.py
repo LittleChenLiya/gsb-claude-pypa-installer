@@ -11,6 +11,7 @@ from typing import (
     Union,
 )
 
+from installer.exceptions import DestinationCollisionError
 from installer.records import Hash, RecordEntry
 from installer.scripts import Script
 from installer.utils import (
@@ -23,6 +24,7 @@ from installer.utils import (
 )
 
 if TYPE_CHECKING:
+    from installer._core import PlannedTarget
     from installer.scripts import LauncherKind, ScriptSection
 
 
@@ -94,6 +96,41 @@ class WheelDestination:
 
             >>> dest.finalize_installation("purelib")
 
+        """
+        raise NotImplementedError
+
+    def get_script_target(
+        self, name: str, module: str, attr: str, section: "ScriptSection"
+    ) -> tuple[Scheme, str]:
+        """Describe where the script of a given entry point would be written.
+
+        This is used for pre-installation collision checks, which must happen
+        before anything is written. It must not write anything.
+
+        :param name: name of the script
+        :param module: module path, to load the entry point from
+        :param attr: final attribute access, for the entry point
+        :param section: Denotes the "entry point section" where this was specified.
+            Valid values are ``"gui"`` and ``"console"``.
+        :type section: str
+
+        Example usage/behaviour::
+
+            >>> dest.get_script_target("pip", "pip._internal.cli", "main", "console")
+            ("scripts", "pip")
+
+        """
+        raise NotImplementedError
+
+    def check_target_collisions(self, targets: Iterable["PlannedTarget"]) -> None:
+        """Check a complete set of planned writes for target path collisions.
+
+        This is called before any target is written, when the caller opted in
+        to the check. It must not write anything, and should raise
+        :class:`~installer.exceptions.DestinationCollisionError` when two or
+        more planned targets collide.
+
+        :param targets: all files this installation is about to write
         """
         raise NotImplementedError
 
@@ -252,6 +289,53 @@ class SchemeDictionaryDestination(WheelDestination):
             path.chmod(mode)
 
             return entry
+
+    def get_script_target(
+        self, name: str, module: str, attr: str, section: "ScriptSection"
+    ) -> tuple[Scheme, str]:
+        """Describe where a generated entry point script would be written.
+
+        Mirrors :py:meth:`write_script`'s naming, but does not generate the
+        script's contents or write anything.
+        """
+        script_name = Script(name, module, attr, section).target_name(self.script_kind)
+        return Scheme("scripts"), script_name
+
+    def check_target_collisions(self, targets: Iterable["PlannedTarget"]) -> None:
+        """Check planned writes for case-insensitive target path collisions.
+
+        Applies Windows' case-insensitive rules to the *resolved* target
+        paths, so this also catches cross-scheme collisions (e.g. an archive
+        file in ``scripts/`` colliding with a generated entry point script)
+        and collisions involving the ``destdir`` staging directory.
+
+        Raises :class:`~installer.exceptions.DestinationCollisionError`
+        listing -- for each collision -- the two source paths involved and
+        the target path they'd both write to. Nothing is written when a
+        collision is found.
+        """
+        seen: dict[str, str] = {}
+        collisions: list[tuple[str, str, str]] = []
+        for target in targets:
+            target_path = self._path_with_destdir(target.scheme, target.path)
+            # Normalize as the Windows filesystem would: backslash and forward
+            # slash are both separators, and path comparison is case-insensitive.
+            key = str(target_path).replace("\\", "/").casefold()
+
+            previous_source = seen.get(key)
+            if previous_source is not None:
+                collisions.append((previous_source, target.source, str(target_path)))
+            else:
+                seen[key] = target.source
+
+        if collisions:
+            lines = ["Target path collision(s) detected (case-insensitive):"]
+            for source_a, source_b, collided_target in collisions:
+                lines.append(
+                    f"  {source_a!r} and {source_b!r} would both write to "
+                    f"{collided_target!r}"
+                )
+            raise DestinationCollisionError("\n".join(lines))
 
     def _compile_bytecode(self, scheme: Scheme, record: RecordEntry) -> None:
         """Compile bytecode for a single .py file."""

@@ -56,6 +56,16 @@ def _get_main_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="silently overwrite existing files",
     )
+    parser.add_argument(
+        "--check-case-collisions",
+        action="store_true",
+        help=(
+            "fail before writing anything if two files of the wheel "
+            "(including generated entry point scripts) would be installed "
+            "to target paths that differ only in case, which collide on "
+            "Windows' case-insensitive filesystems (default: off)"
+        ),
+    )
     return parser
 
 
@@ -108,7 +118,12 @@ def _main(cli_args: Sequence[str], program: str | None = None) -> None:
                 destdir=args.destdir,
                 overwrite_existing=args.overwrite_existing,
             )
-            installer.install(source, destination, {})
+            installer.install(
+                source,
+                destination,
+                {},
+                check_case_collisions=args.check_case_collisions,
+            )
 
 
 if __name__ == "__main__":  # pragma: no cover
